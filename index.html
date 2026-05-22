@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I trained a Polish voice for fun (and it tied with the model I started from)</title>
+<meta name="description" content="A weekend log: fine-tuning an XTTS-v2 Polish text-to-speech model on my own server — the data, the GPU trick, the NaN that nearly broke me, and an honest result.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Hanken+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0b0e; --bg2:#0f1116; --panel:#13151c;
+    --ink:#ECE7DA; --muted:#8b8d86; --faint:#5d5f66;
+    --signal:#c2f94b; --signal-dim:#8aa838; --error:#ff6a5a; --amber:#f4c04e;
+    --line:rgba(236,231,218,.12); --line-strong:rgba(236,231,218,.28);
+    --display:'Fraunces',serif; --body:'Hanken Grotesk',system-ui,sans-serif; --mono:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--body);
+    font-size:18px; line-height:1.65; -webkit-font-smoothing:antialiased;
+    overflow-x:hidden; position:relative;
+  }
+  /* film grain overlay */
+  body::after{
+    content:""; position:fixed; inset:0; z-index:9999; pointer-events:none; opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  a{color:var(--signal); text-decoration:none; border-bottom:1px solid var(--signal-dim)}
+  a:hover{color:#dfffa0}
+  ::selection{background:var(--signal); color:#0a0b0e}
+
+  .wrap{max-width:780px; margin:0 auto; padding:0 28px}
+
+  /* ---------- HERO ---------- */
+  header{
+    position:relative; padding:90px 0 60px; overflow:hidden;
+    border-bottom:1px solid var(--line);
+    background:
+      radial-gradient(120% 80% at 80% -10%, rgba(194,249,75,.10), transparent 60%),
+      radial-gradient(90% 70% at -10% 110%, rgba(255,106,90,.08), transparent 55%);
+  }
+  .eyebrow{
+    font-family:var(--mono); font-size:12px; letter-spacing:.32em; text-transform:uppercase;
+    color:var(--signal); display:flex; gap:14px; align-items:center; margin-bottom:26px;
+  }
+  .eyebrow::before{content:""; width:34px; height:1px; background:var(--signal)}
+  h1{
+    font-family:var(--display); font-weight:900; font-optical-sizing:144;
+    font-size:clamp(2.6rem,7.5vw,4.7rem); line-height:.98; letter-spacing:-.02em; margin-bottom:24px;
+  }
+  h1 em{font-style:italic; font-weight:400; color:var(--amber)}
+  .lede{font-size:1.22rem; color:#cfcabd; max-width:60ch}
+  .lede b{color:var(--ink); font-weight:700}
+  .meta{
+    display:flex; flex-wrap:wrap; gap:8px 26px; margin-top:34px;
+    font-family:var(--mono); font-size:13px; color:var(--muted); letter-spacing:.02em;
+  }
+  .meta span{color:var(--ink)}
+
+  /* waveform strip */
+  .wave{display:flex; align-items:flex-end; gap:3px; height:74px; margin-top:46px; opacity:.9}
+  .wave i{flex:1; background:linear-gradient(var(--signal),var(--signal-dim)); border-radius:2px;
+    animation:bob 1.5s ease-in-out infinite; transform-origin:bottom}
+  @keyframes bob{0%,100%{transform:scaleY(.18)}50%{transform:scaleY(1)}}
+
+  /* ---------- BODY ---------- */
+  main{padding:18px 0 40px}
+  section{padding:46px 0; border-bottom:1px solid var(--line)}
+  .kicker{
+    font-family:var(--mono); font-size:12px; letter-spacing:.28em; text-transform:uppercase;
+    color:var(--signal-dim); margin-bottom:14px;
+  }
+  h2{font-family:var(--display); font-weight:600; font-size:clamp(1.7rem,4.5vw,2.5rem);
+    line-height:1.05; letter-spacing:-.015em; margin-bottom:20px}
+  h3{font-family:var(--display); font-weight:600; font-size:1.32rem; margin:30px 0 10px}
+  p{margin-bottom:18px; color:#d6d1c5}
+  p b,li b{color:var(--ink); font-weight:700}
+  ul{margin:0 0 18px 0; padding-left:0; list-style:none}
+  li{position:relative; padding-left:26px; margin-bottom:11px; color:#d6d1c5}
+  li::before{content:"▹"; position:absolute; left:0; color:var(--signal); font-size:.9em; top:1px}
+
+  /* stat band */
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line);
+    border:1px solid var(--line); border-radius:14px; overflow:hidden; margin:8px 0 6px}
+  .stat{background:var(--bg2); padding:22px 16px; text-align:center}
+  .stat b{display:block; font-family:var(--display); font-weight:900; font-size:1.9rem; color:var(--signal); line-height:1}
+  .stat span{display:block; font-family:var(--mono); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--muted); margin-top:9px}
+  @media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}}
+
+  /* terminal / log block */
+  .term{background:#070809; border:1px solid var(--line-strong); border-radius:12px;
+    font-family:var(--mono); font-size:13px; line-height:1.7; margin:24px 0; overflow:hidden}
+  .term .bar{display:flex; gap:7px; padding:11px 15px; border-bottom:1px solid var(--line);
+    background:#0c0d10}
+  .term .bar i{width:11px; height:11px; border-radius:50%; background:#2a2c33}
+  .term .bar i:first-child{background:var(--error)} .term .bar i:nth-child(2){background:var(--amber)}
+  .term .bar i:nth-child(3){background:var(--signal-dim)}
+  .term .bar span{margin-left:10px; color:var(--faint); font-size:11.5px; align-self:center}
+  .term pre{padding:16px 18px; overflow-x:auto; color:#c9c7bf; white-space:pre}
+  .term .nan{color:var(--error); font-weight:700}
+  .term .ok{color:var(--signal)}
+  .term .dim{color:var(--faint)}
+  .term .cmt{color:#6b6d74; font-style:italic}
+
+  /* callout */
+  .note{border-left:3px solid var(--amber); background:linear-gradient(90deg,rgba(244,192,78,.07),transparent);
+    padding:18px 22px; border-radius:0 10px 10px 0; margin:24px 0}
+  .note.bad{border-color:var(--error); background:linear-gradient(90deg,rgba(255,106,90,.08),transparent)}
+  .note.good{border-color:var(--signal); background:linear-gradient(90deg,rgba(194,249,75,.08),transparent)}
+  .note p:last-child{margin-bottom:0}
+  .note .lab{font-family:var(--mono); font-size:11px; letter-spacing:.2em; text-transform:uppercase; color:var(--amber); display:block; margin-bottom:7px}
+  .note.bad .lab{color:var(--error)} .note.good .lab{color:var(--signal)}
+
+  /* audio player card */
+  .players{display:grid; gap:16px; margin:26px 0}
+  .pc{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px}
+  .pc .top{display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:6px}
+  .pc .who{font-family:var(--mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase}
+  .pc.ft .who{color:var(--signal)} .pc.base .who{color:var(--amber)}
+  .pc .txt{color:var(--muted); font-size:.92rem; font-style:italic; margin-bottom:13px; font-family:var(--display)}
+  audio{width:100%; height:38px; filter:saturate(.5) brightness(.95)}
+  .ab{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  @media(max-width:560px){.ab{grid-template-columns:1fr}}
+  .ab-head{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--faint);margin:30px 0 -6px}
+
+  /* WER table */
+  .scoreboard{width:100%; border-collapse:collapse; margin:22px 0; font-family:var(--mono); font-size:14px}
+  .scoreboard th{text-align:left; padding:12px 14px; border-bottom:2px solid var(--line-strong);
+    font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); font-weight:500}
+  .scoreboard th:not(:first-child){text-align:center}
+  .scoreboard td{padding:12px 14px; border-bottom:1px solid var(--line); color:var(--ink)}
+  .scoreboard td:not(:first-child){text-align:center}
+  .scoreboard .win{color:var(--signal); font-weight:700}
+  .scoreboard .lose{color:var(--error); font-weight:700}
+  .scoreboard tr:last-child td{border-bottom:none}
+  .cap{font-family:var(--mono); font-size:12px; color:var(--faint); margin-top:-6px}
+
+  /* footer */
+  footer{padding:60px 0 80px; text-align:center}
+  footer .big{font-family:var(--display); font-style:italic; font-weight:400;
+    font-size:clamp(1.5rem,4vw,2.1rem); color:var(--ink); line-height:1.25; margin-bottom:26px; max-width:24ch; margin-inline:auto}
+  footer .sig{font-family:var(--mono); font-size:12.5px; color:var(--muted); letter-spacing:.05em}
+
+  /* reveal */
+  .reveal{opacity:0; transform:translateY(22px); transition:opacity .7s ease, transform .7s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1; transform:none}
+  @media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none}.wave i{animation:none;transform:scaleY(.6)}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Weekend Lab Log · Audio AI</div>
+    <h1>I trained a Polish voice<br><em>for fun</em>, on my own server.</h1>
+    <p class="lede">No lab, no budget, no team. Just a spare <b>RTX&nbsp;3090</b>, a pile of open-source Polish audio, and a weekend. Here's the honest play-by-play — including the bug that produced <b>NaN</b> for three runs straight, and the slightly humbling result at the end.</p>
+    <div class="meta">
+      <div>MODEL · <span>XTTS-v2 fine-tune</span></div>
+      <div>LANG · <span>Polish 🇵🇱</span></div>
+      <div>COMPUTE · <span>1× RTX 3090</span></div>
+      <div>COST · <span>~a few cents of power</span></div>
+    </div>
+    <div class="wave" id="wave" aria-hidden="true"></div>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <section class="reveal">
+    <div class="kicker">00 · The spark</div>
+    <h2>Big labs think voice is “solved.” That's exactly the opening.</h2>
+    <p>I'd just read a piece about <b>Kyutai / Gradium</b> — four researchers who shipped a real-time conversational voice model before OpenAI and a year before xAI's demo. The thesis stuck with me: <b>audio models are absurdly data-efficient compared to text</b>, training them is ~50× cheaper than frontier LLMs, and renting a GPU is “a few clicks.”</p>
+    <p>So the obvious question on a Saturday: <b>could I make a decent Polish text-to-speech voice myself?</b> Not train from scratch — that <em>is</em> a lab job — but fine-tune an open model. Turns out the answer is “yes, the plumbing works,” with an asterisk I'll get to.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">01 · The ingredients</div>
+    <h2>Free Polish audio is everywhere, if you know where to look.</h2>
+    <p>Text-to-speech doesn't need the whole internet. A good voice needs <b>hours, not trillions of tokens</b> — and Polish has plenty of openly-licensed speech sitting on Hugging Face:</p>
+    <ul>
+      <li><b>Multilingual LibriSpeech (pl)</b> — ~100&nbsp;h of read audiobooks, CC&nbsp;BY.</li>
+      <li><b>FLEURS (pl)</b> — small, clean, great as a test set.</li>
+      <li>plus Common&nbsp;Voice, VoxPopuli, M-AILABS… ~250–300&nbsp;h total, commercially usable.</li>
+    </ul>
+    <p>I wrote a tiny importer that streams a dataset, resamples everything to <b>24&nbsp;kHz mono</b>, loudness-normalizes it, and drops it into a standard <span style="font-family:var(--mono);font-size:.9em">wav | text</span> manifest. Pulled ~5&nbsp;hours to start.</p>
+    <div class="stats">
+      <div class="stat"><b>5h</b><span>audio pulled</span></div>
+      <div class="stat"><b>1459</b><span>clips imported</span></div>
+      <div class="stat"><b>329</b><span>after filtering</span></div>
+      <div class="stat"><b>$0</b><span>data cost</span></div>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">02 · The Polish problem</div>
+    <h2>Numbers and dates are where “general” TTS sounds dumb.</h2>
+    <p>If you feed a model “<span style="font-family:var(--mono);font-size:.9em">15:30</span>” or “<span style="font-family:var(--mono);font-size:.9em">2026 roku</span>” it'll choke. Polish is heavily inflected, so I wrote a normalizer that expands them into properly spoken words <em>before</em> the model ever sees them:</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>normalize_pl.py</span></div>
+<pre>"Spotkanie o 15:30"   → "Spotkanie o <span class="ok">piętnaście trzydzieści</span>"
+"w 2026 roku"         → "w <span class="ok">dwa tysiące dwudziesty szósty</span> roku"
+"tel. 123 456 789"    → "telefon <span class="ok">jeden dwa trzy cztery…</span>"  <span class="cmt"># digit-by-digit</span>
+"wzrost o 25%"        → "wzrost o <span class="ok">dwadzieścia pięć procent</span>"</pre>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">03 · The server trick</div>
+    <h2>My GPU was busy hosting a 35-billion-parameter chatbot.</h2>
+    <p>The 3090 wasn't idle — it was running a 35B <span style="font-family:var(--mono);font-size:.9em">llama-server</span> eating <b>19&nbsp;GB</b> of its 24. So the training script does something I'm weirdly proud of: it <b>stops the chatbot to borrow the GPU, trains, and a <span style="font-family:var(--mono);font-size:.9em">trap</span> guarantees the chatbot comes back</b> — even if training crashes, gets killed, or the power of friendship fails.</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>run_on_simp.sh</span></div>
+<pre><span class="dim"># bring the chatbot back no matter how we exit</span>
+trap 'sudo systemctl start rocky-llama.service' EXIT INT TERM
+
+sudo systemctl stop rocky-llama.service   <span class="cmt"># free 19 GB</span>
+python train/finetune_xtts.py             <span class="cmt"># borrow the card</span>
+<span class="dim"># …trap fires here → chatbot restored, GPU handed back</span></pre>
+    </div>
+    <p>It worked perfectly every single time — survived <b>47 restart attempts</b> during one run and still came back serving on the right port. The safety net was the easy part. The model was not.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">04 · Debugging hell</div>
+    <h2>Then the loss went NaN. And stayed NaN. For three runs.</h2>
+    <p>Training launched, the GPU lit up, steps flew by — and every single loss value was <span style="color:var(--error);font-weight:700">nan</span>. The model was learning precisely nothing.</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>train.log</span></div>
+<pre>STEP: 0/693   | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)
+STEP: 50/693  | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)
+STEP: 100/693 | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)   <span class="cmt"># cool. cool cool cool.</span></pre>
+    </div>
+    <p>The road there was a tour of 2026 dependency archaeology:</p>
+    <ul>
+      <li><b>transformers 5.x</b> had quietly deleted a function the TTS library still imported → pin back to <span style="font-family:var(--mono);font-size:.9em">4.57.6</span>.</li>
+      <li>The TTS library had <b>moved half its classes</b> between releases → chase the imports.</li>
+      <li>A stray <span style="font-family:var(--mono);font-size:.9em">rsync</span> flattened a path and I was running a <b>stale copy of my own training script</b> for two whole runs.</li>
+    </ul>
+    <div class="note bad">
+      <span class="lab">the actual culprit</span>
+      <p>The same forward pass gave a <b>perfectly finite loss on CPU</b> but <b>NaN on GPU</b>. That mismatch was the clue: it wasn't the data — it was <b>fp16</b>. XTTS's GPT decoder overflows in half-precision. Flip training to <b>fp32</b> and the NaN evaporates.</p>
+    </div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>train.log · after the fix</span></div>
+<pre>Mixed precision: <span class="ok">False</span>   Precision: <span class="ok">float32</span>
+STEP: 50/156   | > loss: <span class="ok">0.71</span>
+EPOCH 6/11     | > loss: <span class="ok">0.68</span>   <span class="cmt"># a real number! it lives!</span></pre>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">05 · It lives</div>
+    <h2>518 million parameters, eleven epochs, one finite loss.</h2>
+    <p>In fp32 it trained clean — loss falling epoch over epoch — and dropped a 5.3&nbsp;GB checkpoint. Total wall-clock for the run: a few minutes on the 3090. Here's the very first thing it ever said:</p>
+    <div class="players">
+      <div class="pc ft">
+        <div class="top"><span class="who">◢ first words</span></div>
+        <div class="txt">“Dzień dobry. To jest pierwszy test polskiego głosu, wytrenowany na własnym serwerze.”</div>
+        <audio controls preload="none" src="audio/first-sample.wav"></audio>
+      </div>
+    </div>
+    <p>It speaks Polish. It's intelligible. I was thrilled… until I checked whether it was actually any <em>good</em>.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">06 · The honest scoreboard</div>
+    <h2>Did the fine-tune beat the model I started from? Listen.</h2>
+    <p>The real test (per the Kyutai crew's own advice): <b>trust your ears over metrics</b> — but back it with a number. I generated the same sentences from <span style="color:var(--signal)">my fine-tune</span> and from <span style="color:var(--amber)">stock XTTS</span>, then re-transcribed both with Whisper and measured word error rate.</p>
+
+    <div class="ab-head">A / B · the long sentence</div>
+    <div class="ab">
+      <div class="pc ft">
+        <div class="top"><span class="who">◢ my fine-tune</span></div>
+        <audio controls preload="none" src="audio/ft_long.wav"></audio>
+      </div>
+      <div class="pc base">
+        <div class="top"><span class="who">◢ stock xtts</span></div>
+        <audio controls preload="none" src="audio/base_long.wav"></audio>
+      </div>
+    </div>
+
+    <div class="ab-head">A / B · the greeting</div>
+    <div class="ab">
+      <div class="pc ft">
+        <div class="top"><span class="who">◢ my fine-tune</span></div>
+        <audio controls preload="none" src="audio/ft_greet.wav"></audio>
+      </div>
+      <div class="pc base">
+        <div class="top"><span class="who">◢ stock xtts</span></div>
+        <audio controls preload="none" src="audio/base_greet.wav"></audio>
+      </div>
+    </div>
+
+    <table class="scoreboard">
+      <thead><tr><th>Sentence</th><th>My fine-tune</th><th>Stock XTTS</th></tr></thead>
+      <tbody>
+        <tr><td>greeting</td><td>0.00</td><td>0.00</td></tr>
+        <tr><td>question</td><td>0.00</td><td>0.00</td></tr>
+        <tr><td>numbers / date</td><td>0.53</td><td>0.53</td></tr>
+        <tr><td>long</td><td class="lose">0.11</td><td class="win">0.00</td></tr>
+      </tbody>
+    </table>
+    <p class="cap">Word error rate (lower = better). The 0.53 on numbers is a measurement artifact — Whisper writes “2026,” my reference says it in words.</p>
+
+    <div class="note bad">
+      <span class="lab">verdict</span>
+      <p>My fine-tune is <b>basically tied with stock XTTS — and slightly worse on the long sentence.</b> Training on 0.7&nbsp;h of <em>many</em> different speakers didn't teach it a voice; it just smeared the strong base model a little. This is a <b>successful pipeline, not a successful voice.</b></p>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">07 · What I actually learned</div>
+    <h2>The lesson is the fun part.</h2>
+    <ul>
+      <li><b>Modern TTS is shockingly accessible.</b> Open weights + free data + one consumer GPU got me a working Polish voice pipeline in a weekend, for the cost of electricity.</li>
+      <li><b>Fine-tuning isn't free magic.</b> A strong base model is hard to beat with scraps. To actually <em>improve</em> on it you need <b>one consistent speaker</b> and a few clean hours — not a multi-speaker soup.</li>
+      <li><b>The bugs are 90% of the work</b> — and 100% of the story. fp16 NaNs, deleted library functions, a self-inflicted <span style="font-family:var(--mono);font-size:.9em">rsync</span> path. Same as it ever was.</li>
+      <li><b>Build the safety net first.</b> Best decision all weekend was the <span style="font-family:var(--mono);font-size:.9em">trap</span> that always handed the GPU back to the chatbot.</li>
+    </ul>
+    <div class="note good">
+      <span class="lab">next time</span>
+      <p>Pick <b>one</b> voice — a single narrator, or my own — record/collect 1–3&nbsp;clean hours of short clips, and train it properly. That's the difference between “it speaks Polish” and “that's <em>my</em> voice coming out of the machine.”</p>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="big">A weekend, a spare GPU, and a voice that says “dzień dobry.” Worth it.</p>
+    <p class="sig">built for fun · XTTS-v2 · open Polish speech · 1× RTX 3090 · 2026</p>
+  </div>
+</footer>
+
+<script>
+  // hero waveform — deterministic bar heights
+  const wave = document.getElementById('wave');
+  if (wave){
+    const N = 64;
+    for (let i=0;i<N;i++){
+      const b = document.createElement('i');
+      const h = 0.2 + 0.8*Math.abs(Math.sin(i*0.5)*Math.cos(i*0.17));
+      b.style.height = (h*100)+'%';
+      b.style.animationDelay = (i*0.045)+'s';
+      b.style.animationDuration = (1.1 + (i%5)*0.18)+'s';
+      wave.appendChild(b);
+    }
+  }
+  // scroll reveals
+  const io = new IntersectionObserver((es)=>{
+    es.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+  },{threshold:.12});
+  document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+</script>
+</body>
+</html>
