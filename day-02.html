@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Day 02 · How XTTS actually works — A New Model Every Day</title>
+<meta name="description" content="An explainer: neural codecs, residual vector quantization, semantic vs acoustic tokens, and why modern text-to-speech is just an LLM predicting sound — mapped onto a real XTTS-v2 training run.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Hanken+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav"><div class="wrap">
+  <a class="brand" href="index.html"><b>◢</b> A New Model Every Day</a>
+  <a class="back" href="index.html">← all entries</a>
+</div></nav>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Day 02 · Explainer</div>
+    <h1>How XTTS<br>actually works.</h1>
+    <p class="lede">Before training a <em>better</em> voice, understand the machine. Here's the whole stack — <b>audio as tokens, neural codecs, and TTS as language modeling</b> — built up from first principles and mapped onto every artifact from Day&nbsp;01's real run.</p>
+    <div class="meta">
+      <div>READS ON · <span>VALL-E · EnCodec · Mimi</span></div>
+      <div>LEVEL · <span>intuition + the why</span></div>
+    </div>
+    <div class="wave" id="wave" aria-hidden="true"></div>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <section class="reveal">
+    <div class="kicker">01 · The one idea</div>
+    <h2>Treat audio as a sequence of tokens.</h2>
+    <p>Raw audio is ~24,000 numbers <em>per second</em> — far too long and continuous to model directly. The breakthrough: <b>compress audio into a short sequence of discrete tokens</b> (like words), then model speech the way LLMs model text — <b>next-token prediction</b>.</p>
+    <p>That one move is why scrappy teams can beat big labs at audio: once audio is tokens, you inherit <em>everything</em> from the LLM world — transformers, scaling, in-context learning.</p>
+    <div class="diagram"><div class="pipe">
+      <span class="box">waveform</span><span class="arrow">→</span>
+      <span class="box k">encoder</span><span class="arrow">→</span>
+      <span class="box k">quantizer</span><span class="arrow">→</span>
+      <span class="box">🎟 tokens</span><span class="arrow">→</span>
+      <span class="box k">decoder</span><span class="arrow">→</span>
+      <span class="box">waveform</span>
+    </div></div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">02 · The codec brick</div>
+    <h2>How audio becomes tokens: residual vector quantization.</h2>
+    <p>A <b>neural codec</b> learns to compress each ~80&nbsp;ms frame of audio into a few discrete codes. It uses <b>Residual Vector Quantization (RVQ)</b> — a stack of codebooks where each one quantizes what the previous one <em>missed</em>:</p>
+    <div class="diagram"><div class="rvq">
+      <div class="row"><span class="lbl">codebook 1 →</span><span class="chip">coarse shape</span></div>
+      <div class="row"><span class="lbl">codebook 2 →</span><span class="chip">+ residual</span></div>
+      <div class="row"><span class="lbl">codebook 3 →</span><span class="chip">+ finer residual</span></div>
+      <div class="row"><span class="lbl">… codebook N →</span><span class="chip">+ detail</span></div>
+    </div></div>
+    <p>So one frame becomes <b>N tokens</b>. One second ≈ 75 frames × 8 codebooks (EnCodec), or just 12.5 frames × 8 (Kyutai's <b>Mimi</b>). Fewer frames = easier to model = lower latency.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">03 · The deep distinction</div>
+    <h2>Semantic vs. acoustic tokens.</h2>
+    <p>Not all tokens carry the same thing — this is the heart of the audio-AI story:</p>
+    <div class="diagram">
+      <div class="seq"><span class="chip sem">content</span><span class="chip sem">content</span><span class="chip sem">content</span> <span style="color:var(--faint)">← semantic: <em>what</em> is said (phonetics, meaning)</span></div>
+      <div class="seq"><span class="chip ac">timbre</span><span class="chip ac">pitch</span><span class="chip ac">style</span><span class="chip ac">detail</span> <span style="color:var(--faint)">← acoustic: <em>how</em> it sounds (the voice itself)</span></div>
+      <div class="legend"><span><i style="background:var(--signal)"></i>semantic (HuBERT/WavLM)</span><span><i style="background:var(--error)"></i>acoustic (EnCodec/SoundStream)</span></div>
+    </div>
+    <p>Old recipe (AudioLM): predict <b>semantic first</b> (the words) → then <b>acoustic</b> (the sound). <b>Mimi's trick:</b> distill the semantic signal into <em>codebook&nbsp;#1</em> of the codec, so token&nbsp;1 = meaning and tokens 2–N = sound — all in one streaming pass. One codec, both jobs.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">04 · The acoustic model</div>
+    <h2>VALL-E: a language model over codec tokens.</h2>
+    <p>Once audio is tokens, TTS becomes shockingly simple to state:</p>
+    <div class="diagram"><div class="seq" style="font-size:12.5px">
+      <span class="chip text">text: dzień</span><span class="chip text">dobry</span>
+      <span class="chip cond">🎙 3s of YOUR voice (tokens)</span>
+      <span class="arrow" style="font-family:var(--mono)">⟶ predict ⟶</span>
+      <span class="chip audio">a₁</span><span class="chip audio">a₂</span><span class="chip audio">a₃</span><span class="chip audio">…</span>
+    </div>
+    <div class="legend"><span><i style="background:var(--sky)"></i>voice prompt</span><span><i style="background:var(--signal)"></i>text</span><span><i style="background:var(--amber)"></i>predicted audio tokens</span></div>
+    </div>
+    <p>The magic: because the <b>reference voice's tokens sit in the prompt</b>, the model continues <em>in that voice</em>. Zero-shot cloning is just <b>in-context learning</b> — the same trick as few-shot prompting an LLM. No per-voice training required.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">05 · XTTS, dissected</div>
+    <h2>Every artifact from Day 01, explained.</h2>
+    <p>XTTS-v2 is one GPT modelling a joint sequence — <span class="mono">[ speaker conditioning ][ text tokens ][ audio tokens ]</span> — predicting audio tokens it then decodes to sound:</p>
+    <div class="diagram"><div class="seq">
+      <span class="chip cond">cond</span><span class="chip cond">cond</span>
+      <span class="chip text">tekst</span><span class="chip text">→</span>
+      <span class="chip audio">audio</span><span class="chip audio">audio</span><span class="chip audio">audio →</span>
+    </div></div>
+    <table class="map">
+      <tr><td>text_inputs (224-char limit)</td><td><b>Front-end:</b> multilingual BPE tokenizer + a <span class="mono">[pl]</span> language token.</td></tr>
+      <tr><td>cond_mels · get_conditioning_latents()</td><td><b>Speaker brick:</b> reference clip → mel → conditioning latents (a perceiver resampler) prepended to the GPT. This is the voice.</td></tr>
+      <tr><td>audio_codes · shape (2, 235), ≤ 1012</td><td><b>Codec brick:</b> XTTS's DVAE turns the mel into ~1024-vocab discrete audio tokens.</td></tr>
+      <tr><td>the 518M-param GPT</td><td><b>Acoustic model:</b> a GPT-2-style decoder predicting the next audio token — VALL-E-style.</td></tr>
+      <tr><td>loss_text_ce + loss_mel_ce</td><td>It's trained to predict <em>both</em> the text tokens and the audio tokens in one sequence — that's why there were two losses.</td></tr>
+      <tr><td>output_sample_rate = 24000</td><td><b>Vocoder:</b> audio tokens → a HiFi-GAN-style decoder → 24&nbsp;kHz waveform.</td></tr>
+    </table>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">06 · The key insight</div>
+    <h2>The voice lives in the prompt, not the weights.</h2>
+    <div class="note good">
+      <span class="lab">why my fine-tune tied with base</span>
+      <p>In VALL-E/XTTS, <b>voice identity is carried mostly by the reference conditioning</b> — the weights just know “Polish, and how to clone <em>any</em> voice from a prompt.” Day 01's fine-tune nudged the weights with a soup of speakers, but at inference the identity still came from the reference clip, which base XTTS already uses perfectly. So it tied.</p>
+    </div>
+    <p>Fine-tuning only wins when you (a) lock onto <b>one consistent voice</b> so the weights specialize, (b) adapt prosody/style/domain, or (c) fill a language/accent gap. That's the entire reason the roadmap pivots to a single speaker.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">07 · The bugs, explained by theory</div>
+    <h2>Now the war stories make sense.</h2>
+    <ul>
+      <li><b>fp16 → NaN:</b> the GPT's attention logits get large; fp16 maxes out at <span class="mono">~65,504</span> → overflow → <span style="color:var(--error)">inf</span> → <span style="color:var(--error)">NaN</span>. fp32 (or bf16, which keeps fp32's exponent <em>range</em>) has the headroom. Precision is about range, not just speed.</li>
+      <li><b>The ≤11&nbsp;s clip rule:</b> <span class="mono">gpt_max_audio_tokens</span> caps the audio-token sequence; longer audio overruns the position embeddings → garbage. Theory dictates the data rule.</li>
+      <li><b>The 224-char text limit:</b> the same ceiling, on the text-token side.</li>
+    </ul>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">08 · The map ahead</div>
+    <h2>Two families — and which brick to swap.</h2>
+    <p>When XTTS hits a ceiling, you don't start over — you swap one brick:</p>
+    <ul>
+      <li><b>Autoregressive token-LMs</b> (VALL-E, XTTS, Moshi) — flexible, great cloning, in-context; but slower and can repeat/hallucinate.</li>
+      <li><b>Flow-matching / diffusion</b> (StyleTTS2, F5-TTS, VoxCPM2) — predict the acoustic representation in parallel or via an ODE → fast, stable, often more natural. Some skip discrete tokens entirely (“tokenizer-free”).</li>
+    </ul>
+    <div class="note">
+      <span class="lab">next, on Day 03 →</span>
+      <p>Theory meets numbers: build the <b>evaluation triangle</b> (WER + speaker-similarity + naturalness) and measure base XTTS zero-shot on one clean voice — the “how much do I get for free?” experiment.</p>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="big">Understand the machine, then earn every brick you add to it.</p>
+    <p class="sig">Day 02 · explainer · 2026</p>
+    <p class="wink"><a href="day-01.html">← Day 01: the build</a> &nbsp;·&nbsp; <a href="index.html">all entries</a></p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

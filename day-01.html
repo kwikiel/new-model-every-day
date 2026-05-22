@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Day 01 · I trained a Polish voice for fun — A New Model Every Day</title>
+<meta name="description" content="Day 01: fine-tuning an XTTS-v2 Polish text-to-speech model on one RTX 3090 — the data, the GPU trick, the NaN that nearly broke me, and an honest result with playable audio.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Hanken+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav"><div class="wrap">
+  <a class="brand" href="index.html"><b>◢</b> A New Model Every Day</a>
+  <a class="back" href="index.html">← all entries</a>
+</div></nav>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Day 01 · Build log</div>
+    <h1>I trained a Polish voice<br><em>for fun</em>, on my own server.</h1>
+    <p class="lede">No lab, no budget, no team. Just a spare <b>RTX&nbsp;3090</b>, a pile of open-source Polish audio, and a weekend. Here's the honest play-by-play — including the bug that produced <b>NaN</b> for three runs straight, and the slightly humbling result at the end.</p>
+    <div class="meta">
+      <div>MODEL · <span>XTTS-v2 fine-tune</span></div>
+      <div>LANG · <span>Polish 🇵🇱</span></div>
+      <div>COMPUTE · <span>1× RTX 3090</span></div>
+      <div>COST · <span>~a few cents of power</span></div>
+    </div>
+    <div class="wave" id="wave" aria-hidden="true"></div>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <section class="reveal">
+    <div class="kicker">00 · The spark</div>
+    <h2>Big labs think voice is “solved.” That's exactly the opening.</h2>
+    <p>I'd just read a piece about <b>Kyutai / Gradium</b> — four researchers who shipped a real-time conversational voice model before OpenAI and a year before xAI's demo. The thesis stuck with me: <b>audio models are absurdly data-efficient compared to text</b>, training them is ~50× cheaper than frontier LLMs, and renting a GPU is “a few clicks.”</p>
+    <p>So the obvious question on a Saturday: <b>could I make a decent Polish text-to-speech voice myself?</b> Not train from scratch — that <em>is</em> a lab job — but fine-tune an open model. Turns out the answer is “yes, the plumbing works,” with an asterisk I'll get to.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">01 · The ingredients</div>
+    <h2>Free Polish audio is everywhere, if you know where to look.</h2>
+    <p>Text-to-speech doesn't need the whole internet. A good voice needs <b>hours, not trillions of tokens</b> — and Polish has plenty of openly-licensed speech sitting on Hugging Face:</p>
+    <ul>
+      <li><b>Multilingual LibriSpeech (pl)</b> — ~100&nbsp;h of read audiobooks, CC&nbsp;BY.</li>
+      <li><b>FLEURS (pl)</b> — small, clean, great as a test set.</li>
+      <li>plus Common&nbsp;Voice, VoxPopuli, M-AILABS… ~250–300&nbsp;h total, commercially usable.</li>
+    </ul>
+    <p>I wrote a tiny importer that streams a dataset, resamples everything to <b>24&nbsp;kHz mono</b>, loudness-normalizes it, and drops it into a standard <span class="mono">wav | text</span> manifest. Pulled ~5&nbsp;hours to start.</p>
+    <div class="stats">
+      <div class="stat"><b>5h</b><span>audio pulled</span></div>
+      <div class="stat"><b>1459</b><span>clips imported</span></div>
+      <div class="stat"><b>329</b><span>after filtering</span></div>
+      <div class="stat"><b>$0</b><span>data cost</span></div>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">02 · The Polish problem</div>
+    <h2>Numbers and dates are where “general” TTS sounds dumb.</h2>
+    <p>If you feed a model “<span class="mono">15:30</span>” or “<span class="mono">2026 roku</span>” it'll choke. Polish is heavily inflected, so I wrote a normalizer that expands them into properly spoken words <em>before</em> the model ever sees them:</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>normalize_pl.py</span></div>
+<pre>"Spotkanie o 15:30"   → "Spotkanie o <span class="ok">piętnaście trzydzieści</span>"
+"w 2026 roku"         → "w <span class="ok">dwa tysiące dwudziesty szósty</span> roku"
+"tel. 123 456 789"    → "telefon <span class="ok">jeden dwa trzy cztery…</span>"  <span class="cmt"># digit-by-digit</span>
+"wzrost o 25%"        → "wzrost o <span class="ok">dwadzieścia pięć procent</span>"</pre>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">03 · The server trick</div>
+    <h2>My GPU was busy hosting a 35-billion-parameter chatbot.</h2>
+    <p>The 3090 wasn't idle — it was running a 35B <span class="mono">llama-server</span> eating <b>19&nbsp;GB</b> of its 24. So the training script does something I'm weirdly proud of: it <b>stops the chatbot to borrow the GPU, trains, and a <span class="mono">trap</span> guarantees the chatbot comes back</b> — even if training crashes, gets killed, or the power of friendship fails.</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>run_on_simp.sh</span></div>
+<pre><span class="dim"># bring the chatbot back no matter how we exit</span>
+trap 'sudo systemctl start rocky-llama.service' EXIT INT TERM
+
+sudo systemctl stop rocky-llama.service   <span class="cmt"># free 19 GB</span>
+python train/finetune_xtts.py             <span class="cmt"># borrow the card</span>
+<span class="dim"># …trap fires here → chatbot restored, GPU handed back</span></pre>
+    </div>
+    <p>It worked perfectly every single time — survived <b>47 restart attempts</b> during one run and still came back serving on the right port. The safety net was the easy part. The model was not.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">04 · Debugging hell</div>
+    <h2>Then the loss went NaN. And stayed NaN. For three runs.</h2>
+    <p>Training launched, the GPU lit up, steps flew by — and every single loss value was <span style="color:var(--error);font-weight:700">nan</span>. The model was learning precisely nothing.</p>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>train.log</span></div>
+<pre>STEP: 0/693   | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)
+STEP: 50/693  | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)
+STEP: 100/693 | > loss: <span class="nan">nan</span>  (<span class="nan">nan</span>)   <span class="cmt"># cool. cool cool cool.</span></pre>
+    </div>
+    <p>The road there was a tour of 2026 dependency archaeology:</p>
+    <ul>
+      <li><b>transformers 5.x</b> had quietly deleted a function the TTS library still imported → pin back to <span class="mono">4.57.6</span>.</li>
+      <li>The TTS library had <b>moved half its classes</b> between releases → chase the imports.</li>
+      <li>A stray <span class="mono">rsync</span> flattened a path and I was running a <b>stale copy of my own training script</b> for two whole runs.</li>
+    </ul>
+    <div class="note bad">
+      <span class="lab">the actual culprit</span>
+      <p>The same forward pass gave a <b>perfectly finite loss on CPU</b> but <b>NaN on GPU</b>. That mismatch was the clue: it wasn't the data — it was <b>fp16</b>. XTTS's GPT decoder overflows in half-precision. Flip training to <b>fp32</b> and the NaN evaporates.</p>
+    </div>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i><span>train.log · after the fix</span></div>
+<pre>Mixed precision: <span class="ok">False</span>   Precision: <span class="ok">float32</span>
+STEP: 50/156   | > loss: <span class="ok">0.71</span>
+EPOCH 6/11     | > loss: <span class="ok">0.68</span>   <span class="cmt"># a real number! it lives!</span></pre>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">05 · It lives</div>
+    <h2>518 million parameters, eleven epochs, one finite loss.</h2>
+    <p>In fp32 it trained clean — loss falling epoch over epoch — and dropped a 5.3&nbsp;GB checkpoint. Total wall-clock for the run: a few minutes on the 3090. Here's the very first thing it ever said:</p>
+    <div class="players">
+      <div class="pc ft">
+        <div class="top"><span class="who">◢ first words</span></div>
+        <div class="txt">“Dzień dobry. To jest pierwszy test polskiego głosu, wytrenowany na własnym serwerze.”</div>
+        <audio controls preload="none" src="audio/first-sample.wav"></audio>
+      </div>
+    </div>
+    <p>It speaks Polish. It's intelligible. I was thrilled… until I checked whether it was actually any <em>good</em>.</p>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">06 · The honest scoreboard</div>
+    <h2>Did the fine-tune beat the model I started from? Listen.</h2>
+    <p>The real test (per the Kyutai crew's own advice): <b>trust your ears over metrics</b> — but back it with a number. I generated the same sentences from <span style="color:var(--signal)">my fine-tune</span> and from <span style="color:var(--amber)">stock XTTS</span>, then re-transcribed both with Whisper and measured word error rate.</p>
+
+    <div class="ab-head">A / B · the long sentence</div>
+    <div class="ab">
+      <div class="pc ft"><div class="top"><span class="who">◢ my fine-tune</span></div><audio controls preload="none" src="audio/ft_long.wav"></audio></div>
+      <div class="pc base"><div class="top"><span class="who">◢ stock xtts</span></div><audio controls preload="none" src="audio/base_long.wav"></audio></div>
+    </div>
+    <div class="ab-head">A / B · the greeting</div>
+    <div class="ab">
+      <div class="pc ft"><div class="top"><span class="who">◢ my fine-tune</span></div><audio controls preload="none" src="audio/ft_greet.wav"></audio></div>
+      <div class="pc base"><div class="top"><span class="who">◢ stock xtts</span></div><audio controls preload="none" src="audio/base_greet.wav"></audio></div>
+    </div>
+
+    <table class="scoreboard">
+      <thead><tr><th>Sentence</th><th>My fine-tune</th><th>Stock XTTS</th></tr></thead>
+      <tbody>
+        <tr><td>greeting</td><td>0.00</td><td>0.00</td></tr>
+        <tr><td>question</td><td>0.00</td><td>0.00</td></tr>
+        <tr><td>numbers / date</td><td>0.53</td><td>0.53</td></tr>
+        <tr><td>long</td><td class="lose">0.11</td><td class="win">0.00</td></tr>
+      </tbody>
+    </table>
+    <p class="cap">Word error rate (lower = better). The 0.53 on numbers is a measurement artifact — Whisper writes “2026,” my reference says it in words.</p>
+
+    <div class="note bad">
+      <span class="lab">verdict</span>
+      <p>My fine-tune is <b>basically tied with stock XTTS — and slightly worse on the long sentence.</b> Training on 0.7&nbsp;h of <em>many</em> different speakers didn't teach it a voice; it just smeared the strong base model a little. This is a <b>successful pipeline, not a successful voice.</b></p>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="kicker">07 · What I actually learned</div>
+    <h2>The lesson is the fun part.</h2>
+    <ul>
+      <li><b>Modern TTS is shockingly accessible.</b> Open weights + free data + one consumer GPU got me a working Polish voice pipeline in a weekend, for the cost of electricity.</li>
+      <li><b>Fine-tuning isn't free magic.</b> A strong base model is hard to beat with scraps. To actually <em>improve</em> on it you need <b>one consistent speaker</b> and a few clean hours — not a multi-speaker soup.</li>
+      <li><b>The bugs are 90% of the work</b> — and 100% of the story. fp16 NaNs, deleted library functions, a self-inflicted <span class="mono">rsync</span> path. Same as it ever was.</li>
+      <li><b>Build the safety net first.</b> Best decision all weekend was the <span class="mono">trap</span> that always handed the GPU back to the chatbot.</li>
+    </ul>
+    <div class="note good">
+      <span class="lab">next, on Day 02 →</span>
+      <p>Before training smarter, I go deep on the theory: <b>how XTTS actually works</b> — audio as tokens, neural codecs, and why voice identity lives in the <em>reference</em>, not the weights. <a href="day-02.html">Read the explainer →</a></p>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="big">A weekend, a spare GPU, and a voice that says “dzień dobry.” Worth it.</p>
+    <p class="sig">Day 01 · XTTS-v2 · open Polish speech · 1× RTX 3090 · 2026</p>
+    <p class="wink"><a href="index.html">← back to all entries</a></p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
